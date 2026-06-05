@@ -1,0 +1,1868 @@
+===== FILE: requirements.txt =====
+streamlit>=1.28.0
+pandas>=2.0.0
+numpy>=1.24.0
+plotly>=5.14.0
+pydeck>=0.8.0
+folium>=0.14.0
+streamlit-aggrid>=0.3.4
+openpyxl>=3.1.0
+requests>=2.31.0
+sqlalchemy>=2.0.0
+python-dotenv>=1.0.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+scikit-learn>=1.3.0
+umap-learn>=0.5.5
+nltk>=3.8.0
+gensim>=4.3.0
+wordcloud>=1.9.0
+networkx>=3.0
+pyvis>=0.3.2
+playwright>=1.40.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+loguru>=0.7.0
+tenacity>=8.2.0
+typing-extensions>=4.7.0
+
+===== FILE: .streamlit/config.toml =====
+[theme]
+primaryColor = "#F63366"
+backgroundColor = "#0E1117"
+secondaryBackgroundColor = "#262730"
+textColor = "#FAFAFA"
+font = "sans serif"
+
+[server]
+maxUploadSize = 10
+
+[browser]
+gatherUsageStats = false
+
+[runner]
+magicEnabled = false
+
+[logger]
+level = "info"
+
+===== FILE: config.py =====
+"""
+Configurazione centralizzata dell'applicazione.
+Carica variabili d'ambiente, API keys e parametri di sistema.
+"""
+
+import os
+from pathlib import Path
+from typing import Optional, List
+from pydantic_settings import BaseSettings
+from dotenv import load_dotenv
+
+# Carica .env dalla root del progetto
+load_dotenv()
+
+class Settings(BaseSettings):
+    """Configurazioni dell'applicazione."""
+    
+    # API Keys
+    espacenet_consumer_key: Optional[str] = os.getenv("ESPACENET_CONSUMER_KEY")
+    espacenet_consumer_secret: Optional[str] = os.getenv("ESPACENET_CONSUMER_SECRET")
+    uspto_api_key: Optional[str] = os.getenv("USPTO_API_KEY")
+    lens_bearer_token: Optional[str] = os.getenv("LENS_BEARER_TOKEN")
+    
+    # Cache settings
+    cache_ttl_hours: int = 24
+    cache_db_path: Path = Path("data/patent_cache.db")
+    
+    # Rate limiting (richieste al secondo per ogni API)
+    rate_limit_eps: float = 1.0  # 1 richiesta al secondo di default
+    rate_limit_espacenet: float = 0.5  # 2 sec tra richieste
+    rate_limit_uspto: float = 2.0
+    rate_limit_lens: float = 1.0
+    rate_limit_wipo: float = 0.2
+    rate_limit_google: float = 0.1
+    
+    # Paths
+    data_dir: Path = Path("data")
+    demo_data_dir: Path = Path("demo_data")
+    logs_dir: Path = Path("logs")
+    
+    # Queries per materiale
+    queries: dict = {
+        "Zama": {
+            "keywords": '"zinc alloy die casting" OR "zamak" OR "zinc pressure casting"',
+            "cpc": "B22D17/* AND C22C18/*"
+        },
+        "Alluminio": {
+            "keywords": '"aluminium die casting" OR "aluminum pressure die casting"',
+            "cpc": "B22D17/* AND C22C21/*"
+        },
+        "Magnesio": {
+            "keywords": '"magnesium die casting" OR "magnesium alloy pressure casting"',
+            "cpc": "B22D17/* AND C22C23/*"
+        }
+    }
+    
+    # Anni di default per analisi
+    default_year_start: int = 2010
+    default_year_end: int = 2025
+    
+    # NLP settings
+    nlp_max_features: int = 1000
+    nlp_num_clusters: int = 8  # K per KMeans
+    nlp_lda_topics: int = 10
+    nlp_random_state: int = 42
+    
+    # Geo settings
+    default_latitude: float = 40.0
+    default_longitude: float = 10.0
+    default_zoom: int = 4
+    
+    class Config:
+        env_file = ".env"
+        case_sensitive = False
+
+# Istanza singleton delle configurazioni
+settings = Settings()
+
+# Assicura che le directory esistano
+settings.data_dir.mkdir(exist_ok=True)
+settings.logs_dir.mkdir(exist_ok=True)
+settings.demo_data_dir.mkdir(exist_ok=True)
+
+===== FILE: data/models.py =====
+"""
+Modelli Pydantic per i brevetti e i dati associati.
+"""
+
+from typing import List, Optional, Dict, Any
+from datetime import date, datetime
+from pydantic import BaseModel, Field, field_validator
+
+class Applicant(BaseModel):
+    """Modello per un depositante/assegnatario."""
+    name: str
+    country: Optional[str] = None
+    city: Optional[str] = None
+    organization_type: Optional[str] = None  # "company", "university", "individual", etc.
+
+class Citation(BaseModel):
+    """Modello per una citazione."""
+    patent_id: str
+    title: Optional[str] = None
+    relationship: str  # "forward" o "backward"
+    date: Optional[date] = None
+
+class Patent(BaseModel):
+    """Modello principale per un brevetto."""
+    # Identificativi
+    id: str  # Numero brevetto (es: EP1234567)
+    title: str
+    abstract: str
+    application_number: Optional[str] = None
+    publication_number: Optional[str] = None
+    
+    # Classificazione
+    ipc_classes: List[str] = Field(default_factory=list)
+    cpc_classes: List[str] = Field(default_factory=list)
+    
+    # Date
+    filing_date: Optional[date] = None
+    publication_date: Optional[date] = None
+    grant_date: Optional[date] = None
+    expiry_date: Optional[date] = None
+    
+    # Soggetti
+    inventors: List[str] = Field(default_factory=list)
+    applicants: List[Applicant] = Field(default_factory=list)
+    assignees: List[Applicant] = Field(default_factory=list)
+    
+    # Status e giurisdizione
+    status: str  # "granted", "pending", "expired", "unknown"
+    country_code: str = "EP"  # Default Europe
+    legal_status: Optional[Dict[str, Any]] = None
+    
+    # Citazioni
+    forward_citations: List[Citation] = Field(default_factory=list)
+    backward_citations: List[Citation] = Field(default_factory=list)
+    
+    # Metadati
+    raw_data: Dict[str, Any] = Field(default_factory=dict)
+    material_category: str  # "Zama", "Alluminio", "Magnesio"
+    data_source: str  # "espacenet", "uspto", "lens", "wipo", "google", "demo"
+    
+    @field_validator("material_category")
+    @classmethod
+    def validate_material(cls, v: str) -> str:
+        allowed = {"Zama", "Alluminio", "Magnesio"}
+        if v not in allowed:
+            raise ValueError(f"Materiale {v} non riconosciuto. Usare uno di {allowed}")
+        return v
+    
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v: str) -> str:
+        allowed = {"granted", "pending", "expired", "unknown"}
+        if v not in allowed:
+            raise ValueError(f"Status {v} non valido")
+        return v
+    
+    class Config:
+        json_encoders = {
+            date: lambda v: v.isoformat(),
+            datetime: lambda v: v.isoformat()
+        }
+
+class TrendData(BaseModel):
+    """Modello per dati di trend temporali."""
+    year: int
+    material: str
+    count: int
+    growth_rate_pct: Optional[float] = None
+    moving_avg_3y: Optional[float] = None
+    moving_avg_5y: Optional[float] = None
+
+class ClusterDocument(BaseModel):
+    """Documento per clustering NLP."""
+    patent_id: str
+    title: str
+    abstract: str
+    material: str
+    cluster_label: int = -1
+    topic_distribution: Dict[str, float] = Field(default_factory=dict)
+
+class FTOScore(BaseModel):
+    """Freedom-to-operate score per un brevetto."""
+    patent_id: str
+    score: float  # 0-100, più alto = maggiore rischio
+    age_factor: float
+    citation_factor: float
+    claim_factor: float
+    risk_level: str  # "basso", "medio", "alto"
+
+===== FILE: data/cache.py =====
+"""
+Sistema di caching su SQLite per i risultati delle API.
+"""
+
+import json
+import pickle
+import sqlite3
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Dict, List, Any, Optional, Union
+from contextlib import contextmanager
+
+from loguru import logger
+
+from config import settings
+
+class PatentCache:
+    """Cache persistente su SQLite per risposte API e dati elaborati."""
+    
+    def __init__(self, db_path: Optional[Path] = None):
+        self.db_path = db_path or settings.cache_db_path
+        self.ttl_seconds = settings.cache_ttl_hours * 3600
+        self._init_db()
+    
+    def _init_db(self) -> None:
+        """Crea le tabelle necessarie se non esistono."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            # Tabella per i risultati delle API
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS api_cache (
+                    key TEXT PRIMARY KEY,
+                    data TEXT NOT NULL,
+                    created_at TIMESTAMP NOT NULL,
+                    expires_at TIMESTAMP NOT NULL
+                )
+            """)
+            # Tabella per i brevetti elaborati (strutturati)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS patents_cache (
+                    patent_id TEXT PRIMARY KEY,
+                    material TEXT NOT NULL,
+                    data TEXT NOT NULL,
+                    created_at TIMESTAMP NOT NULL
+                )
+            """)
+            conn.commit()
+    
+    @contextmanager
+    def _get_connection(self):
+        """Context manager per la connessione SQLite."""
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            yield conn
+        finally:
+            conn.close()
+    
+    def get_api_result(self, key: str) -> Optional[List[Dict[str, Any]]]:
+        """Recupera un risultato API dalla cache se non è scaduto."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT data, expires_at FROM api_cache WHERE key = ?",
+                    (key,)
+                )
+                row = cursor.fetchone()
+                if row:
+                    expires_at = datetime.fromisoformat(row["expires_at"])
+                    if datetime.now() < expires_at:
+                        data = json.loads(row["data"])
+                        logger.debug(f"Cache hit per key: {key}")
+                        return data
+                    else:
+                        logger.debug(f"Cache scaduta per key: {key}")
+                        self._delete_key(key)
+        except Exception as e:
+            logger.error(f"Errore lettura cache: {e}")
+        return None
+    
+    def set_api_result(self, key: str, data: List[Dict[str, Any]]) -> None:
+        """Salva un risultato API in cache con TTL."""
+        try:
+            now = datetime.now()
+            expires_at = now + timedelta(seconds=self.ttl_seconds)
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT OR REPLACE INTO api_cache (key, data, created_at, expires_at) VALUES (?, ?, ?, ?)",
+                    (key, json.dumps(data, default=str), now.isoformat(), expires_at.isoformat())
+                )
+                conn.commit()
+                logger.debug(f"Salvato in cache key: {key}")
+        except Exception as e:
+            logger.error(f"Errore scrittura cache: {e}")
+    
+    def _delete_key(self, key: str) -> None:
+        """Elimina una chiave dalla cache."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM api_cache WHERE key = ?", (key,))
+            conn.commit()
+    
+    def clear_expired(self) -> int:
+        """Pulisce tutte le voci scadute. Restituisce il numero eliminato."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM api_cache WHERE expires_at < ?", (datetime.now().isoformat(),))
+            deleted = cursor.rowcount
+            conn.commit()
+            logger.info(f"Puliti {deleted} elementi scaduti dalla cache")
+            return deleted
+    
+    def save_patent(self, patent_id: str, material: str, data_dict: Dict[str, Any]) -> None:
+        """Salva un brevetto singolo nella cache strutturata."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT OR REPLACE INTO patents_cache (patent_id, material, data, created_at) VALUES (?, ?, ?, ?)",
+                    (patent_id, material, json.dumps(data_dict, default=str), datetime.now().isoformat())
+                )
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Errore salvataggio brevetto {patent_id}: {e}")
+    
+    def get_patent(self, patent_id: str) -> Optional[Dict[str, Any]]:
+        """Recupera un brevetto dalla cache."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT data FROM patents_cache WHERE patent_id = ?", (patent_id,))
+                row = cursor.fetchone()
+                if row:
+                    return json.loads(row["data"])
+        except Exception as e:
+            logger.error(f"Errore recupero brevetto {patent_id}: {e}")
+        return None
+    
+    def get_all_patents_by_material(self, material: str) -> List[Dict[str, Any]]:
+        """Recupera tutti i brevetti di un dato materiale."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT data FROM patents_cache WHERE material = ?", (material,))
+                rows = cursor.fetchall()
+                return [json.loads(row["data"]) for row in rows]
+        except Exception as e:
+            logger.error(f"Errore recupero brevetti per {material}: {e}")
+            return []
+
+# Istanza globale della cache
+cache = PatentCache()
+
+===== FILE: data/fetchers.py =====
+"""
+Connettori per le 5 fonti brevettuali con fallback, rate limiting e caching.
+"""
+
+import time
+import random
+import json
+from abc import ABC, abstractmethod
+from typing import List, Dict, Any, Optional, Tuple
+from datetime import datetime, date
+from urllib.parse import quote
+
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
+from tenacity import retry, stop_after_attempt, wait_exponential
+from loguru import logger
+
+from config import settings
+from data.cache import cache
+from data.models import Patent, Applicant
+
+class BaseFetcher(ABC):
+    """Classe base astratta per i fetcher API."""
+    
+    def __init__(self):
+        self.session = self._create_session()
+        self.rate_limit_delay = 1.0 / getattr(settings, f"rate_limit_{self.source_name.lower()}", settings.rate_limit_eps)
+    
+    def _create_session(self) -> requests.Session:
+        """Crea una sessione requests con retry."""
+        session = requests.Session()
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        return session
+    
+    @property
+    @abstractmethod
+    def source_name(self) -> str:
+        """Nome della fonte (es. 'espacenet', 'uspto')."""
+        pass
+    
+    @abstractmethod
+    def build_query(self, material: str, year_start: int, year_end: int, **kwargs) -> str:
+        """Costruisce la query secondo la sintassi della fonte."""
+        pass
+    
+    @abstractmethod
+    def fetch_patents(self, material: str, year_start: int, year_end: int, **kwargs) -> List[Dict[str, Any]]:
+        """Esegue la chiamata API e restituisce lista di brevetti grezzi."""
+        pass
+    
+    def _rate_limit(self):
+        """Applica rate limiting."""
+        time.sleep(self.rate_limit_delay)
+    
+    def _to_patent_model(self, raw: Dict[str, Any], material: str) -> Patent:
+        """Converte dizionario grezzo in modello Patent."""
+        # Implementazione di base da override nelle sottoclassi
+        return Patent(
+            id=raw.get("id", ""),
+            title=raw.get("title", ""),
+            abstract=raw.get("abstract", ""),
+            filing_date=self._parse_date(raw.get("filing_date")),
+            publication_date=self._parse_date(raw.get("publication_date")),
+            grant_date=self._parse_date(raw.get("grant_date")),
+            expiry_date=self._parse_date(raw.get("expiry_date")),
+            inventors=raw.get("inventors", []),
+            applicants=[Applicant(name=a) for a in raw.get("applicants", [])],
+            assignees=[Applicant(name=a) for a in raw.get("assignees", [])],
+            ipc_classes=raw.get("ipc_classes", []),
+            cpc_classes=raw.get("cpc_classes", []),
+            status=raw.get("status", "unknown"),
+            country_code=raw.get("country_code", "EP"),
+            material_category=material,
+            data_source=self.source_name,
+        )
+    
+    def _parse_date(self, date_str: Optional[str]) -> Optional[date]:
+        """Converte stringa in oggetto date."""
+        if not date_str:
+            return None
+        try:
+            # Tenta diversi formati comuni
+            for fmt in ("%Y-%m-%d", "%Y%m%d", "%d/%m/%Y", "%Y"):
+                try:
+                    return datetime.strptime(date_str, fmt).date()
+                except ValueError:
+                    continue
+        except Exception:
+            pass
+        return None
+
+
+class EspacenetFetcher(BaseFetcher):
+    """Connettore per Espacenet OPS API v3.2 con OAuth2."""
+    
+    source_name = "espacenet"
+    
+    def __init__(self):
+        super().__init__()
+        self.consumer_key = settings.espacenet_consumer_key
+        self.consumer_secret = settings.espacenet_consumer_secret
+        self.token = None
+        self.token_expiry = 0
+    
+    def _get_token(self) -> Optional[str]:
+        """Ottiene token OAuth2 da Espacenet."""
+        if self.token and time.time() < self.token_expiry - 60:
+            return self.token
+        
+        if not self.consumer_key or not self.consumer_secret:
+            logger.warning("Espacenet: credenziali mancanti")
+            return None
+        
+        try:
+            auth_url = "https://ops.epo.org/3.2/auth/token"
+            data = {
+                "grant_type": "client_credentials",
+                "client_id": self.consumer_key,
+                "client_secret": self.consumer_secret,
+            }
+            resp = self.session.post(auth_url, data=data)
+            if resp.status_code == 200:
+                token_data = resp.json()
+                self.token = token_data["access_token"]
+                self.token_expiry = time.time() + token_data["expires_in"]
+                return self.token
+        except Exception as e:
+            logger.error(f"Espacenet auth error: {e}")
+        return None
+    
+    def build_query(self, material: str, year_start: int, year_end: int, **kwargs) -> str:
+        """Costruisce query Espacenet."""
+        q = settings.queries[material]["keywords"]
+        cpc = settings.queries[material]["cpc"]
+        return f"({q}) AND (cpc={cpc}) AND (pd between {year_start} and {year_end})"
+    
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=2, max=10))
+    def fetch_patents(self, material: str, year_start: int, year_end: int, **kwargs) -> List[Dict[str, Any]]:
+        """Recupera brevetti da Espacenet."""
+        self._rate_limit()
+        token = self._get_token()
+        if not token:
+            return []
+        
+        query = self.build_query(material, year_start, year_end)
+        url = "https://ops.epo.org/3.2/rest-services/published-data/search"
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        params = {"q": query, "Range": "1-100"}  # Max 100 per demo
+        
+        try:
+            resp = self.session.get(url, headers=headers, params=params, timeout=30)
+            if resp.status_code == 200:
+                data = resp.json()
+                patents = self._parse_response(data, material)
+                logger.info(f"Espacenet: trovati {len(patents)} brevetti per {material}")
+                return patents
+        except Exception as e:
+            logger.error(f"Espacenet fetch error: {e}")
+        return []
+    
+    def _parse_response(self, data: Dict, material: str) -> List[Dict[str, Any]]:
+        """Estrae brevetti dalla risposta Espacenet."""
+        results = []
+        try:
+            docs = data.get("ops:world-patent-data", {}).get("exchange-documents", [])
+            for doc in docs:
+                biblio = doc.get("bibliographic-data", {})
+                patent = {
+                    "id": biblio.get("publication-reference", {}).get("document-number", ""),
+                    "title": biblio.get("invention-title", {}).get("$", ""),
+                    "abstract": doc.get("abstract", {}).get("$", ""),
+                    "filing_date": biblio.get("application-reference", {}).get("date", ""),
+                    "publication_date": biblio.get("publication-reference", {}).get("date", ""),
+                    "inventors": [inv.get("inventor-name", {}).get("$", "") for inv in biblio.get("inventors", [])],
+                    "applicants": [app.get("applicant-name", {}).get("$", "") for app in biblio.get("applicants", [])],
+                    "cpc_classes": [cls.get("text", "") for cls in biblio.get("classifications-cpc", [])],
+                    "status": "granted" if biblio.get("grant-date") else "pending",
+                }
+                results.append(patent)
+        except Exception as e:
+            logger.error(f"Parsing Espacenet: {e}")
+        return results
+
+
+class USPTOFetcher(BaseFetcher):
+    """Connettore per USPTO PatentsView API."""
+    
+    source_name = "uspto"
+    
+    def build_query(self, material: str, year_start: int, year_end: int, **kwargs) -> str:
+        """Query USPTO."""
+        kw = settings.queries[material]["keywords"]
+        return f'(_text_any:"{kw}") AND (_gte:"filing_date:{year_start}" AND _lte:"filing_date:{year_end}")'
+    
+    @retry(stop=stop_after_attempt(2))
+    def fetch_patents(self, material: str, year_start: int, year_end: int, **kwargs) -> List[Dict[str, Any]]:
+        """Recupera brevetti da USPTO."""
+        self._rate_limit()
+        api_key = settings.uspto_api_key
+        if not api_key:
+            logger.warning("USPTO API key mancante")
+            return []
+        
+        url = "https://api.patentsview.org/patents/query"
+        headers = {"X-Api-Key": api_key, "Content-Type": "application/json"}
+        query_body = {
+            "q": self.build_query(material, year_start, year_end),
+            "f": ["patent_id", "patent_title", "patent_abstract", "filing_date", "grant_date", 
+                  "inventor_name", "assignee_organization", "cpc_subgroup_id"],
+            "s": [{"patent_id": "asc"}],
+            "o": {"per_page": 100}
+        }
+        
+        try:
+            resp = self.session.post(url, json=query_body, headers=headers, timeout=30)
+            if resp.status_code == 200:
+                data = resp.json()
+                patents = self._parse_response(data, material)
+                logger.info(f"USPTO: trovati {len(patents)} brevetti")
+                return patents
+        except Exception as e:
+            logger.error(f"USPTO fetch error: {e}")
+        return []
+    
+    def _parse_response(self, data: Dict, material: str) -> List[Dict[str, Any]]:
+        results = []
+        for pat in data.get("patents", []):
+            patent = {
+                "id": pat.get("patent_id", ""),
+                "title": pat.get("patent_title", ""),
+                "abstract": pat.get("patent_abstract", ""),
+                "filing_date": pat.get("filing_date", ""),
+                "grant_date": pat.get("grant_date", ""),
+                "inventors": [inv.get("inventor_name", "") for inv in pat.get("inventors", [])],
+                "applicants": [ass.get("assignee_organization", "") for ass in pat.get("assignees", [])],
+                "cpc_classes": [cpc.get("cpc_subgroup_id", "") for cpc in pat.get("cpc_subgroups", [])],
+                "country_code": "US",
+                "status": "granted" if pat.get("grant_date") else "pending",
+            }
+            results.append(patent)
+        return results
+
+
+class LensFetcher(BaseFetcher):
+    """Connettore per Lens.org API."""
+    
+    source_name = "lens"
+    
+    def build_query(self, material: str, year_start: int, year_end: int, **kwargs) -> str:
+        """Costruisce query Lens."""
+        kw = settings.queries[material]["keywords"]
+        return f'({kw}) AND (date_published:[{year_start}-01-01 TO {year_end}-12-31])'
+    
+    @retry(stop=stop_after_attempt(2))
+    def fetch_patents(self, material: str, year_start: int, year_end: int, **kwargs) -> List[Dict[str, Any]]:
+        """Recupera brevetti da Lens."""
+        self._rate_limit()
+        token = settings.lens_bearer_token
+        if not token:
+            return []
+        
+        url = "https://api.lens.org/patent/search"
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        query = self.build_query(material, year_start, year_end)
+        payload = {
+            "query": {"boolean": {"operator": "AND", "operands": [{"term": query}]}},
+            "size": 100
+        }
+        
+        try:
+            resp = self.session.post(url, json=payload, headers=headers, timeout=30)
+            if resp.status_code == 200:
+                data = resp.json()
+                patents = self._parse_response(data, material)
+                return patents
+        except Exception as e:
+            logger.error(f"Lens error: {e}")
+        return []
+    
+    def _parse_response(self, data: Dict, material: str) -> List[Dict[str, Any]]:
+        results = []
+        for doc in data.get("data", []):
+            patent = {
+                "id": doc.get("patent_number", ""),
+                "title": doc.get("title", ""),
+                "abstract": doc.get("abstract", ""),
+                "filing_date": doc.get("filing_date", ""),
+                "publication_date": doc.get("publication_date", ""),
+                "inventors": [inv["name"] for inv in doc.get("inventors", [])],
+                "applicants": [app["name"] for app in doc.get("applicants", [])],
+                "cpc_classes": [cpc["code"] for cpc in doc.get("cpc_classifications", [])],
+                "country_code": doc.get("jurisdiction", ""),
+                "status": doc.get("legal_status", "unknown"),
+            }
+            results.append(patent)
+        return results
+
+
+class WIPOFetcher(BaseFetcher):
+    """Connettore per WIPO PatentScope (endpoint pubblico)."""
+    
+    source_name = "wipo"
+    
+    def build_query(self, material: str, year_start: int, year_end: int, **kwargs) -> str:
+        kw = settings.queries[material]["keywords"]
+        return f'EN_ALL:"{kw}" AND DP:({year_start}-{year_end})'
+    
+    def fetch_patents(self, material: str, year_start: int, year_end: int, **kwargs) -> List[Dict[str, Any]]:
+        """Recupera brevetti da WIPO (simulazione con API pubblica)."""
+        self._rate_limit()
+        url = "https://patentscope.wipo.int/search/en/search.jsf"
+        # WIPO non ha una API REST semplice; simuliamo una risposta di demo
+        # In produzione si potrebbe usare scraping, ma qui per brevità restituisce [].
+        logger.info("WIPO fetcher: API pubblica limitata, restituisce demo vuoto")
+        return []
+
+
+class GooglePatentsScraper(BaseFetcher):
+    """Scraper per Google Patents usando Playwright."""
+    
+    source_name = "google"
+    
+    def build_query(self, material: str, year_start: int, year_end: int, **kwargs) -> str:
+        kw = settings.queries[material]["keywords"]
+        return f"{kw} after:{year_start} before:{year_end}"
+    
+    def fetch_patents(self, material: str, year_start: int, year_end: int, **kwargs) -> List[Dict[str, Any]]:
+        """Scraping Google Patents."""
+        self._rate_limit()
+        query = self.build_query(material, year_start, year_end)
+        url = f"https://patents.google.com/?q={quote(query)}&num=50"
+        
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                page = browser.new_page()
+                page.goto(url, timeout=30000)
+                page.wait_for_selector("article", timeout=10000)
+                elements = page.query_selector_all("article")
+                patents = []
+                for el in elements[:30]:
+                    title_el = el.query_selector("h3")
+                    title = title_el.inner_text() if title_el else ""
+                    patent_id_el = el.query_selector("span.patent-number")
+                    patent_id = patent_id_el.inner_text() if patent_id_el else ""
+                    abstract_el = el.query_selector("div.abstract")
+                    abstract = abstract_el.inner_text() if abstract_el else ""
+                    patents.append({
+                        "id": patent_id,
+                        "title": title,
+                        "abstract": abstract,
+                        "filing_date": None,
+                        "inventors": [],
+                        "applicants": [],
+                        "status": "unknown",
+                        "country_code": "US",
+                    })
+                browser.close()
+                logger.info(f"Google: scrapati {len(patents)} brevetti")
+                return patents
+        except Exception as e:
+            logger.error(f"Google scraping error: {e}")
+            return []
+
+
+class CompositePatentFetcher:
+    """
+    Fetcher composito che prova tutte le fonti in ordine, usa cache e demo.
+    """
+    
+    def __init__(self):
+        self.fetchers = [
+            EspacenetFetcher(),
+            USPTOFetcher(),
+            LensFetcher(),
+            WIPOFetcher(),
+            GooglePatentsScraper(),
+        ]
+        self.cache = cache
+    
+    def _get_cache_key(self, material: str, year_start: int, year_end: int, **kwargs) -> str:
+        return f"{material}_{year_start}_{year_end}_{hash(str(kwargs))}"
+    
+    def fetch_patents(self, material: str, year_start: int, year_end: int, force_refresh: bool = False, **kwargs) -> List[Patent]:
+        """
+        Recupera brevetti per materiale e anno, con caching e fallback.
+        Restituisce lista di oggetti Patent.
+        """
+        cache_key = self._get_cache_key(material, year_start, year_end, **kwargs)
+        
+        if not force_refresh:
+            cached = self.cache.get_api_result(cache_key)
+            if cached:
+                # Converti da dict a Patent
+                return [Patent(**p) for p in cached]
+        
+        all_patents = []
+        for fetcher in self.fetchers:
+            logger.info(f"Tentativo con {fetcher.source_name} per {material}")
+            try:
+                raw_patents = fetcher.fetch_patents(material, year_start, year_end, **kwargs)
+                if raw_patents:
+                    patents = [fetcher._to_patent_model(p, material) for p in raw_patents]
+                    all_patents.extend(patents)
+                    logger.info(f"Fonte {fetcher.source_name} ha restituito {len(patents)} brevetti")
+                    # Se abbiamo ottenuto abbastanza dati, interrompiamo
+                    if len(all_patents) >= 30:
+                        break
+            except Exception as e:
+                logger.error(f"Errore in {fetcher.source_name}: {e}")
+                continue
+        
+        # Se nessuna API ha funzionato, carica demo
+        if not all_patents:
+            logger.warning("Nessuna API disponibile, carico demo dataset")
+            all_patents = self._load_demo_patents(material, year_start, year_end)
+        
+        # Salva in cache
+        patent_dicts = [p.model_dump(mode="json") for p in all_patents]
+        self.cache.set_api_result(cache_key, patent_dicts)
+        
+        return all_patents
+    
+    def _load_demo_patents(self, material: str, year_start: int, year_end: int) -> List[Patent]:
+        """Carica dataset demo da file JSON."""
+        demo_file = settings.demo_data_dir / "patents_sample.json"
+        if not demo_file.exists():
+            # Crea dataset demo minimo
+            self._create_demo_dataset()
+        
+        with open(demo_file, "r") as f:
+            data = json.load(f)
+        
+        patents = []
+        for p in data:
+            p_material = p.get("material_category", "")
+            p_year = p.get("filing_year", 2020)
+            if p_material == material and year_start <= p_year <= year_end:
+                patents.append(Patent(**p))
+        return patents
+    
+    def _create_demo_dataset(self):
+        """Crea un file demo con brevetti fittizi."""
+        demo_patents = [
+            {
+                "id": "EP1234567A1",
+                "title": "Processo di pressofusione per leghe di Zama ad alta resistenza",
+                "abstract": "Metodo per pressofusione di componenti in lega di zinco con migliorata resistenza meccanica.",
+                "filing_date": "2021-03-15",
+                "publication_date": "2022-01-10",
+                "inventors": ["Rossi M.", "Bianchi L."],
+                "applicants": [{"name": "Fonderie Industriali S.p.A.", "country": "IT"}],
+                "ipc_classes": ["B22D17/00"],
+                "cpc_classes": ["B22D17/22", "C22C18/00"],
+                "status": "granted",
+                "country_code": "EP",
+                "material_category": "Zama",
+                "data_source": "demo",
+                "filing_year": 2021,
+            },
+            {
+                "id": "US2022123456A1",
+                "title": "Aluminium die casting method for automotive components",
+                "abstract": "High-pressure die casting of aluminium alloys for structural auto parts.",
+                "filing_date": "2020-06-20",
+                "publication_date": "2022-06-20",
+                "inventors": ["Johnson P.", "Smith R."],
+                "applicants": [{"name": "AutoTech GmbH", "country": "DE"}],
+                "ipc_classes": ["B22D17/00"],
+                "cpc_classes": ["B22D17/20", "C22C21/00"],
+                "status": "granted",
+                "country_code": "US",
+                "material_category": "Alluminio",
+                "data_source": "demo",
+                "filing_year": 2020,
+            },
+            {
+                "id": "WO2023123456A1",
+                "title": "Magnesium alloy die casting with reduced porosity",
+                "abstract": "Die casting process for magnesium alloys minimizing gas porosity.",
+                "filing_date": "2022-09-01",
+                "publication_date": "2023-03-01",
+                "inventors": ["Chen W.", "Liu Y."],
+                "applicants": [{"name": "Magnesium Research Inst.", "country": "CN"}],
+                "cpc_classes": ["B22D17/00", "C22C23/00"],
+                "status": "pending",
+                "country_code": "WO",
+                "material_category": "Magnesio",
+                "data_source": "demo",
+                "filing_year": 2022,
+            },
+            # Aggiungine altri per coprire anni e materiali...
+            {"id": "EP9876543B1", "title": "Zinc alloy with improved fluidity", "abstract": "...", "filing_date": "2019-05-05", "material_category": "Zama", "filing_year": 2019, "applicants": [{"name": "Zamak Corp"}], "status": "granted", "country_code": "EP", "cpc_classes": ["C22C18/00"], "inventors": ["Neri A."]},
+            {"id": "DE102021123456", "title": "Aluminium die casting tool", "abstract": "...", "filing_date": "2021-11-11", "material_category": "Alluminio", "filing_year": 2021, "applicants": [{"name": "Bayerische Motoren Werke"}], "status": "granted", "country_code": "DE"},
+            {"id": "JP2023123456", "title": "Magnesium casting method", "abstract": "...", "filing_date": "2023-01-15", "material_category": "Magnesio", "filing_year": 2023, "applicants": [{"name": "Toyota Jidosha"}], "status": "pending", "country_code": "JP"},
+        ]
+        settings.demo_data_dir.mkdir(exist_ok=True)
+        with open(settings.demo_data_dir / "patents_sample.json", "w") as f:
+            json.dump(demo_patents, f, indent=2)
+
+# Istanza globale
+patent_fetcher = CompositePatentFetcher()
+
+===== FILE: analysis/trends.py =====
+"""
+Analisi dei trend temporali: moving average, crescita YoY, stagionalità.
+"""
+
+import pandas as pd
+import numpy as np
+from typing import List, Dict, Tuple
+from loguru import logger
+
+from data.models import Patent, TrendData
+
+def compute_yearly_counts(patents: List[Patent]) -> pd.DataFrame:
+    """Restituisce DataFrame con conteggi annuali per materiale."""
+    data = []
+    for p in patents:
+        if p.filing_date:
+            year = p.filing_date.year
+            data.append({"year": year, "material": p.material_category, "count": 1})
+    df = pd.DataFrame(data)
+    if df.empty:
+        return pd.DataFrame(columns=["year", "material", "count"])
+    return df.groupby(["year", "material"]).sum().reset_index()
+
+def compute_moving_average(df: pd.DataFrame, window: int) -> pd.DataFrame:
+    """Aggiunge colonne di media mobile per ogni materiale."""
+    result = df.copy()
+    for material in df["material"].unique():
+        mask = result["material"] == material
+        result.loc[mask, f"ma_{window}y"] = (
+            result.loc[mask, "count"].rolling(window, min_periods=1).mean()
+        )
+    return result
+
+def year_over_year_growth(df: pd.DataFrame) -> pd.DataFrame:
+    """Calcola crescita percentuale anno su anno per materiale."""
+    df = df.sort_values(["material", "year"])
+    df["growth_pct"] = df.groupby("material")["count"].pct_change() * 100
+    return df
+
+def aggregate_trends(patents: List[Patent]) -> Dict[str, pd.DataFrame]:
+    """
+    Restituisce dizionario con:
+    - 'trend': DataFrame con conteggi, moving avg, crescita
+    - 'seasonal': DataFrame mensile se disponibile
+    """
+    yearly = compute_yearly_counts(patents)
+    if yearly.empty:
+        return {"trend": yearly, "seasonal": pd.DataFrame()}
+    
+    yearly = compute_moving_average(yearly, 3)
+    yearly = compute_moving_average(yearly, 5)
+    yearly = year_over_year_growth(yearly)
+    
+    # Analisi mensile (richiede date complete)
+    monthly_data = []
+    for p in patents:
+        if p.filing_date:
+            monthly_data.append({
+                "year": p.filing_date.year,
+                "month": p.filing_date.month,
+                "material": p.material_category
+            })
+    monthly_df = pd.DataFrame(monthly_data)
+    if not monthly_df.empty:
+        monthly_df = monthly_df.groupby(["year", "month", "material"]).size().reset_index(name="count")
+    
+    return {"trend": yearly, "seasonal": monthly_df}
+
+def get_top_applicants(patents: List[Patent], n: int = 20) -> pd.DataFrame:
+    """Restituisce top N depositanti con conteggio per materiale."""
+    applicants = []
+    for p in patents:
+        for app in p.applicants:
+            applicants.append({"name": app.name, "material": p.material_category})
+    df = pd.DataFrame(applicants)
+    if df.empty:
+        return pd.DataFrame()
+    top = df.groupby("name").size().reset_index(name="total").sort_values("total", ascending=False).head(n)
+    # Aggiungi suddivisione per materiale
+    mat_counts = df.groupby(["name", "material"]).size().unstack(fill_value=0)
+    top = top.merge(mat_counts, left_on="name", right_index=True, how="left")
+    return top
+
+===== FILE: analysis/clustering.py =====
+"""
+NLP per clustering di abstract: preprocessing, TF-IDF, KMeans, LDA, UMAP.
+"""
+
+import re
+import numpy as np
+import pandas as pd
+from typing import List, Tuple, Dict, Any
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.cluster import KMeans
+from sklearn.decomposition import LatentDirichletAllocation
+from sklearn.metrics import silhouette_score
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import PorterStemmer
+from loguru import logger
+import umap.umap_ as umap
+from wordcloud import WordCloud
+import matplotlib.pyplot as plt
+
+# Download risorse NLTK la prima volta
+try:
+    nltk.data.find('tokenizers/punkt')
+except LookupError:
+    nltk.download('punkt')
+    nltk.download('stopwords')
+
+STEMMER = PorterStemmer()
+STOP_WORDS = set(stopwords.words("italian") + stopwords.words("english") + [
+    "zama", "alluminio", "magnesio", "die", "casting", "pressofusione", "method", "process", "apparatus"
+])
+
+def preprocess_text(text: str) -> str:
+    """Pulizia, stemming e rimozione stopwords."""
+    if not text:
+        return ""
+    text = text.lower()
+    text = re.sub(r"[^a-zàèéìòù\s]", " ", text)
+    tokens = text.split()
+    tokens = [STEMMER.stem(t) for t in tokens if t not in STOP_WORDS and len(t) > 2]
+    return " ".join(tokens)
+
+def prepare_documents(patents: List[Any]) -> Tuple[List[str], List[str]]:
+    """
+    Prepara i documenti per il clustering.
+    Restituisce (testi_preprocessati, lista_id_brevetti).
+    """
+    texts = []
+    ids = []
+    for p in patents:
+        abstract = getattr(p, "abstract", "")
+        title = getattr(p, "title", "")
+        content = f"{title}. {abstract}"
+        processed = preprocess_text(content)
+        if processed:
+            texts.append(processed)
+            ids.append(p.id)
+    return texts, ids
+
+def optimize_kmeans(tfidf_matrix, max_k: int = 15) -> Tuple[int, List[float]]:
+    """Trova il numero ottimale di cluster usando elbow method e silhouette."""
+    inertias = []
+    silhouette_scores = []
+    ks = range(2, min(max_k, tfidf_matrix.shape[0] - 1))
+    for k in ks:
+        kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+        labels = kmeans.fit_predict(tfidf_matrix)
+        inertias.append(kmeans.inertia_)
+        if len(set(labels)) > 1:
+            sil = silhouette_score(tfidf_matrix, labels)
+            silhouette_scores.append(sil)
+        else:
+            silhouette_scores.append(-1)
+    # Scegli k con silhouette massima
+    if silhouette_scores:
+        best_idx = np.argmax(silhouette_scores)
+        best_k = ks[best_idx]
+    else:
+        best_k = 5
+    return best_k, inertias
+
+def cluster_patents(patents: List[Any], n_clusters: int = None) -> Dict[str, Any]:
+    """
+    Esegue clustering KMeans su TF-IDF dei testi.
+    Restituisce dizionario con labels, vettori TF-IDF, modello, ecc.
+    """
+    texts, ids = prepare_documents(patents)
+    if len(texts) < 3:
+        logger.warning("Troppi pochi testi per clustering")
+        return {"labels": [], "vectors": None, "model": None, "ids": ids, "texts": texts}
+    
+    vectorizer = TfidfVectorizer(max_features=1000, min_df=2, max_df=0.9)
+    tfidf = vectorizer.fit_transform(texts)
+    
+    if n_clusters is None:
+        n_clusters, _ = optimize_kmeans(tfidf, max_k=min(10, len(texts)-1))
+    
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    labels = kmeans.fit_predict(tfidf)
+    
+    # Riduzione dimensionale con UMAP
+    reducer = umap.UMAP(n_components=2, random_state=42)
+    embedding = reducer.fit_transform(tfidf.toarray())
+    
+    return {
+        "labels": labels,
+        "vectors": tfidf,
+        "model": kmeans,
+        "vectorizer": vectorizer,
+        "embedding": embedding,
+        "ids": ids,
+        "texts": texts,
+        "n_clusters": n_clusters
+    }
+
+def compute_lda(patents: List[Any], n_topics: int = 10) -> Dict[str, Any]:
+    """
+    Topic modeling con LDA.
+    Restituisce modello, matrice documenti-topic e topic keywords.
+    """
+    texts, ids = prepare_documents(patents)
+    if len(texts) < 2:
+        return {"model": None, "doc_topic": None, "topics": []}
+    
+    vectorizer = TfidfVectorizer(max_features=500, min_df=2, stop_words=list(STOP_WORDS))
+    dtm = vectorizer.fit_transform(texts)
+    
+    lda = LatentDirichletAllocation(n_components=n_topics, random_state=42, max_iter=20)
+    doc_topic = lda.fit_transform(dtm)
+    
+    feature_names = vectorizer.get_feature_names_out()
+    topics_keywords = []
+    for topic_idx, topic in enumerate(lda.components_):
+        top_words_idx = topic.argsort()[-10:][::-1]
+        top_words = [feature_names[i] for i in top_words_idx]
+        topics_keywords.append({"topic_id": topic_idx, "keywords": top_words})
+    
+    return {
+        "model": lda,
+        "doc_topic": doc_topic,
+        "topics": topics_keywords,
+        "vectorizer": vectorizer
+    }
+
+def generate_wordcloud(texts: List[str], title: str = "WordCloud") -> plt.Figure:
+    """Genera wordcloud da lista di testi."""
+    combined = " ".join(texts)
+    if not combined.strip():
+        combined = "nessun dato"
+    wordcloud = WordCloud(width=800, height=400, background_color="black", colormap="viridis").generate(combined)
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.imshow(wordcloud, interpolation="bilinear")
+    ax.axis("off")
+    ax.set_title(title)
+    return fig
+
+===== FILE: analysis/risk.py =====
+"""
+Analisi di rischio IP: FTO score, scadenze, heatmap CPC.
+"""
+
+import pandas as pd
+import numpy as np
+from datetime import date, datetime
+from typing import List, Dict, Tuple, Optional
+from collections import Counter
+from loguru import logger
+
+from data.models import Patent, FTOScore
+
+def compute_fto_score(patent: Patent, current_date: Optional[date] = None) -> FTOScore:
+    """
+    Calcola score di rischio FTO (0-100, più alto = più rischio).
+    Formula pesata:
+    - età (più recente = più rischio) peso 0.4
+    - numero forward citations (più citazioni = più rilevanza) peso 0.3
+    - numero di claims (proxy complessità) peso 0.3
+    """
+    if current_date is None:
+        current_date = date.today()
+    
+    # Age factor: inversamente proporzionale all'età (max 1 per brevetti < 3 anni, min 0.2 per >15 anni)
+    if patent.filing_date:
+        age_years = (current_date - patent.filing_date).days / 365.25
+        age_factor = max(0.2, min(1.0, 1.0 - (age_years / 20)))  # decay lineare fino a 20 anni
+    else:
+        age_factor = 0.5
+    
+    # Citation factor: più forward citations, più rischio (normalizzato su 5)
+    forward_count = len(patent.forward_citations)
+    citation_factor = min(1.0, forward_count / 10.0)
+    
+    # Claim factor: numero di claims (stimato da raw data o default)
+    claims = patent.raw_data.get("claim_count", 10)
+    claim_factor = min(1.0, claims / 30.0)
+    
+    # Score combinato
+    score = (age_factor * 0.4 + citation_factor * 0.3 + claim_factor * 0.3) * 100
+    
+    risk_level = "alto" if score > 70 else "medio" if score > 40 else "basso"
+    
+    return FTOScore(
+        patent_id=patent.id,
+        score=round(score, 2),
+        age_factor=round(age_factor, 2),
+        citation_factor=round(citation_factor, 2),
+        claim_factor=round(claim_factor, 2),
+        risk_level=risk_level
+    )
+
+def track_expiring_patents(patents: List[Patent], years_window: List[int] = [1, 3, 5]) -> Dict[int, List[Patent]]:
+    """
+    Identifica brevetti in scadenza entro finestra di anni.
+    Restituisce dizionario {anni: lista_brevetti}.
+    """
+    today = date.today()
+    expiring = {window: [] for window in years_window}
+    
+    for p in patents:
+        if p.expiry_date:
+            years_to_expiry = (p.expiry_date - today).days / 365.25
+            for w in years_window:
+                if 0 <= years_to_expiry <= w:
+                    expiring[w].append(p)
+    return expiring
+
+def cpc_heatmap_data(patents: List[Patent]) -> pd.DataFrame:
+    """
+    Costruisce matrice CPC subclass × numero brevetti per materiale.
+    Utile per mappatura aree coperte.
+    """
+    data = []
+    for p in patents:
+        for cpc in p.cpc_classes:
+            # Prende sottoclasse (primi 4 caratteri es: B22D17)
+            subclass = cpc[:4] if len(cpc) >= 4 else cpc
+            data.append({
+                "cpc_subclass": subclass,
+                "material": p.material_category,
+                "patent_id": p.id
+            })
+    df = pd.DataFrame(data)
+    if df.empty:
+        return pd.DataFrame()
+    pivot = df.groupby(["cpc_subclass", "material"]).size().unstack(fill_value=0)
+    return pivot
+
+def identify_white_spaces(pivot_df: pd.DataFrame, threshold: int = 2) -> List[Tuple[str, List[str]]]:
+    """
+    Identifica sottoclassi CPC con pochi brevetti (< threshold) per materiale.
+    Restituisce lista di (sottoclasse, [materiali con gap]).
+    """
+    if pivot_df.empty:
+        return []
+    white_spaces = []
+    for subclass in pivot_df.index:
+        low_materials = []
+        for material in pivot_df.columns:
+            if pivot_df.loc[subclass, material] < threshold:
+                low_materials.append(material)
+        if low_materials:
+            white_spaces.append((subclass, low_materials))
+    return white_spaces
+
+def compute_citation_network(patents: List[Patent]) -> Dict:
+    """
+    Analisi citazioni: restituisce statistiche e grafo semplificato (nodi, edges).
+    """
+    forward_map = {}
+    backward_map = {}
+    for p in patents:
+        forward_map[p.id] = [c.patent_id for c in p.forward_citations]
+        backward_map[p.id] = [c.patent_id for c in p.backward_citations]
+    
+    # Most cited patents
+    cited_counts = Counter()
+    for cites_list in forward_map.values():
+        cited_counts.update(cites_list)
+    most_cited = cited_counts.most_common(10)
+    
+    return {
+        "forward_citations": forward_map,
+        "backward_citations": backward_map,
+        "most_cited": most_cited,
+        "total_citations": sum(len(v) for v in forward_map.values())
+    }
+
+===== FILE: main.py =====
+"""
+Applicazione Streamlit principale: gestione sessione, sidebar globale, routing.
+"""
+
+import streamlit as st
+import pandas as pd
+from datetime import date
+from loguru import logger
+
+from config import settings
+from data.fetchers import patent_fetcher
+from data.models import Patent
+from analysis.trends import compute_yearly_counts
+
+# Configurazione pagina
+st.set_page_config(
+    page_title="Die Casting Patent Analytics",
+    page_icon="🏭",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Inizializza stato sessione
+if "patents" not in st.session_state:
+    st.session_state.patents = []
+if "filters" not in st.session_state:
+    st.session_state.filters = {
+        "material": ["Zama", "Alluminio", "Magnesio"],
+        "year_range": (settings.default_year_start, settings.default_year_end),
+        "status": ["granted", "pending", "expired", "unknown"]
+    }
+
+# Sidebar globale
+with st.sidebar:
+    st.image("https://img.icons8.com/fluency/96/patent.png", width=60)
+    st.title("🔍 Filtri Globali")
+    
+    material_filter = st.multiselect(
+        "Materiale/i",
+        options=["Zama", "Alluminio", "Magnesio"],
+        default=st.session_state.filters["material"],
+        help="Seleziona una o più leghe per l'analisi"
+    )
+    
+    year_range = st.slider(
+        "Anni di deposito",
+        min_value=2000,
+        max_value=2030,
+        value=st.session_state.filters["year_range"],
+        step=1
+    )
+    
+    status_filter = st.multiselect(
+        "Stato legale",
+        options=["granted", "pending", "expired", "unknown"],
+        default=st.session_state.filters["status"],
+        help="Concesso, in esame, scaduto o sconosciuto"
+    )
+    
+    refresh_btn = st.button("🔄 Aggiorna dati", use_container_width=True)
+    
+    # Aggiorna filtri in sessione
+    st.session_state.filters["material"] = material_filter
+    st.session_state.filters["year_range"] = year_range
+    st.session_state.filters["status"] = status_filter
+
+# Funzione per caricare dati (cached)
+@st.cache_data(ttl=3600)
+def load_patents_data(material_list, year_start, year_end, force=False):
+    """Carica brevetti da fetcher con caching Streamlit."""
+    all_patents = []
+    for mat in material_list:
+        patents = patent_fetcher.fetch_patents(
+            material=mat,
+            year_start=year_start,
+            year_end=year_end,
+            force_refresh=force
+        )
+        all_patents.extend(patents)
+    return all_patents
+
+# Caricamento dati se necessario
+if refresh_btn or not st.session_state.patents:
+    with st.spinner("Caricamento brevetti in corso..."):
+        st.session_state.patents = load_patents_data(
+            st.session_state.filters["material"],
+            st.session_state.filters["year_range"][0],
+            st.session_state.filters["year_range"][1],
+            force=refresh_btn
+        )
+        logger.info(f"Caricati {len(st.session_state.patents)} brevetti")
+
+# Applica filtri di stato
+filtered_patents = [p for p in st.session_state.patents if p.status in st.session_state.filters["status"]]
+
+# Mostra info nella sidebar
+st.sidebar.markdown(f"**Brevetti visualizzati:** {len(filtered_patents)}")
+
+# La navigazione viene gestita dalle pagine in pages/; qui non c'è bisogno di ulteriore routing
+st.markdown(
+    """
+    <h1 style='text-align: center;'>🏭 Die Casting Patent Intelligence</h1>
+    <p style='text-align: center;'>Analisi brevettuale per Zama, Alluminio e Magnesio</p>
+    """,
+    unsafe_allow_html=True
+)
+
+st.info("📌 Seleziona una pagina dal menu a sinistra per iniziare l'analisi.")
+
+# Mostra KPI di riepilogo nella home
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Totale brevetti", len(filtered_patents))
+col2.metric("Zama", sum(1 for p in filtered_patents if p.material_category == "Zama"))
+col3.metric("Alluminio", sum(1 for p in filtered_patents if p.material_category == "Alluminio"))
+col4.metric("Magnesio", sum(1 for p in filtered_patents if p.material_category == "Magnesio"))
+
+# Breve preview
+if filtered_patents:
+    df_preview = pd.DataFrame([
+        {"ID": p.id, "Titolo": p.title[:60], "Materiale": p.material_category, "Data": p.filing_date}
+        for p in filtered_patents[:5]
+    ])
+    st.dataframe(df_preview, use_container_width=True)
+
+===== FILE: pages/1_Dashboard_Overview.py =====
+"""
+Pagina 1: Dashboard con KPI, heatmap, mappa geografica.
+"""
+
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from collections import Counter
+import pydeck as pdk
+
+from main import filtered_patents
+from analysis.trends import compute_yearly_counts, get_top_applicants
+
+st.set_page_config(layout="wide")
+st.title("📊 Dashboard Panoramica")
+
+patents = filtered_patents
+
+if not patents:
+    st.warning("Nessun brevetto trovato con i filtri correnti.")
+    st.stop()
+
+# KPI cards
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Totale", len(patents))
+col2.metric("Zama", sum(1 for p in patents if p.material_category == "Zama"))
+col3.metric("Alluminio", sum(1 for p in patents if p.material_category == "Alluminio"))
+col4.metric("Magnesio", sum(1 for p in patents if p.material_category == "Magnesio"))
+
+# Suddivisione per anno e materiale
+yearly = compute_yearly_counts(patents)
+if not yearly.empty:
+    fig_line = px.line(yearly, x="year", y="count", color="material", 
+                       title="Andamento depositi per anno", markers=True)
+    st.plotly_chart(fig_line, use_container_width=True)
+
+# Heatmap depositante × anno
+top_apps = get_top_applicants(patents, n=10)
+if not top_apps.empty:
+    # Prepara matrice depositante-anno
+    data = []
+    for p in patents:
+        for app in p.applicants:
+            if app.name in top_apps["name"].values:
+                year = p.filing_date.year if p.filing_date else None
+                if year:
+                    data.append({"applicant": app.name, "year": year})
+    df_hm = pd.DataFrame(data)
+    if not df_hm.empty:
+        pivot = df_hm.groupby(["applicant", "year"]).size().unstack(fill_value=0)
+        fig_hm = px.imshow(pivot, text_auto=True, aspect="auto", 
+                           title="Heatmap Depositanti × Anno",
+                           labels=dict(x="Anno", y="Depositante", color="Numero brevetti"))
+        st.plotly_chart(fig_hm, use_container_width=True)
+
+# Mappa geografica basata su paese dei depositanti
+countries = []
+for p in patents:
+    for app in p.applicants:
+        if app.country:
+            countries.append(app.country)
+country_counts = Counter(countries)
+if country_counts:
+    map_df = pd.DataFrame({"country": list(country_counts.keys()), "count": list(country_counts.values())})
+    fig_map = px.choropleth(map_df, locations="country", locationmode="country names",
+                            color="count", hover_name="country",
+                            title="Distribuzione geografica brevetti attivi",
+                            color_continuous_scale="Viridis")
+    st.plotly_chart(fig_map, use_container_width=True)
+else:
+    st.info("Nessuna informazione paese disponibile per la mappa.")
+
+===== FILE: pages/2_Patent_Search_Filter.py =====
+"""
+Pagina 2: Ricerca testuale e filtri avanzati con tabella interattiva.
+"""
+
+import streamlit as st
+import pandas as pd
+from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
+from io import BytesIO
+import openpyxl
+
+from main import filtered_patents
+
+st.title("🔎 Ricerca & Filtro Brevetti")
+
+patents = filtered_patents
+if not patents:
+    st.warning("Nessun brevetto da visualizzare.")
+    st.stop()
+
+# Costruzione DataFrame
+df = pd.DataFrame([
+    {
+        "ID": p.id,
+        "Titolo": p.title,
+        "Abstract": p.abstract[:200] + "...",
+        "Inventori": ", ".join(p.inventors[:3]),
+        "Depositante": p.applicants[0].name if p.applicants else "N/A",
+        "Anno": p.filing_date.year if p.filing_date else "",
+        "Paese": p.country_code,
+        "Status": p.status,
+        "Materiale": p.material_category,
+        "CPC": ", ".join(p.cpc_classes[:3])
+    }
+    for p in patents
+])
+
+# Filtri UI
+col1, col2 = st.columns(2)
+with col1:
+    search_text = st.text_input("🔍 Cerca in titolo/abstract", placeholder="parola chiave...")
+    selected_material = st.multiselect("Materiale", options=df["Materiale"].unique(), default=df["Materiale"].unique())
+with col2:
+    selected_status = st.multiselect("Stato", options=df["Status"].unique(), default=df["Status"].unique())
+    year_range = st.slider("Anno", min_value=int(df["Anno"].min()), max_value=int(df["Anno"].max()), 
+                           value=(int(df["Anno"].min()), int(df["Anno"].max())))
+
+# Applica filtri
+mask = (df["Materiale"].isin(selected_material)) & (df["Status"].isin(selected_status)) & (df["Anno"].between(year_range[0], year_range[1]))
+if search_text:
+    mask &= (df["Titolo"].str.contains(search_text, case=False) | df["Abstract"].str.contains(search_text, case=False))
+filtered_df = df[mask]
+
+st.subheader(f"Risultati: {len(filtered_df)} brevetti")
+
+# Tabella interattiva con AgGrid
+gb = GridOptionsBuilder.from_dataframe(filtered_df)
+gb.configure_pagination(paginationAutoPageSize=True)
+gb.configure_side_bar()
+gb.configure_selection('single', use_checkbox=False)
+grid_options = gb.build()
+
+grid_response = AgGrid(
+    filtered_df,
+    gridOptions=grid_options,
+    update_mode=GridUpdateMode.SELECTION_CHANGED,
+    fit_columns_on_grid_load=True,
+    theme="streamlit"
+)
+
+selected_row = grid_response["selected_rows"]
+if selected_row is not None and len(selected_row) > 0:
+    selected_id = selected_row.iloc[0]["ID"]
+    patent = next((p for p in patents if p.id == selected_id), None)
+    if patent:
+        with st.expander("📄 Dettaglio brevetto", expanded=True):
+            st.markdown(f"**Titolo:** {patent.title}")
+            st.markdown(f"**Abstract:** {patent.abstract}")
+            st.markdown(f"**Inventori:** {', '.join(patent.inventors)}")
+            st.markdown(f"**Depositanti:** {', '.join([a.name for a in patent.applicants])}")
+            st.markdown(f"**Link Espacenet:** [Clicca qui](https://worldwide.espacenet.com/patent/search?q={patent.id})")
+
+# Export
+if st.button("📥 Esporta CSV"):
+    csv = filtered_df.to_csv(index=False).encode('utf-8')
+    st.download_button("Scarica CSV", data=csv, file_name="brevetti.csv", mime="text/csv")
+
+if st.button("📊 Esporta Excel"):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        filtered_df.to_excel(writer, sheet_name="Brevetti", index=False)
+    st.download_button("Scarica Excel", data=output.getvalue(), file_name="brevetti.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+===== FILE: pages/3_Trend_Analysis.py =====
+"""
+Pagina 3: Analisi trend, medie mobili, crescita YoY, stagionalità.
+"""
+
+import streamlit as st
+import plotly.express as px
+import pandas as pd
+from main import filtered_patents
+from analysis.trends import compute_yearly_counts, compute_moving_average, year_over_year_growth, aggregate_trends
+
+st.title("📈 Trend Brevettuali")
+
+patents = filtered_patents
+if not patents:
+    st.warning("Nessun dato disponibile.")
+    st.stop()
+
+trend_data = aggregate_trends(patents)
+yearly = trend_data["trend"]
+if yearly.empty:
+    st.warning("Dati annuali insufficienti.")
+    st.stop()
+
+# Grafico principale con medie mobili
+fig_main = px.line(yearly, x="year", y="count", color="material", 
+                   title="Numero depositi per anno e materiale")
+for window in [3,5]:
+    col = f"ma_{window}y"
+    if col in yearly.columns:
+        for mat in yearly["material"].unique():
+            mask = yearly["material"] == mat
+            fig_main.add_scatter(x=yearly[mask]["year"], y=yearly[mask][col], 
+                                 mode="lines", name=f"{mat} MA{window}", line=dict(dash="dot"))
+st.plotly_chart(fig_main, use_container_width=True)
+
+# Tabella crescita YoY
+growth_df = year_over_year_growth(yearly.copy())
+if "growth_pct" in growth_df.columns:
+    pivot_growth = growth_df.pivot(index="year", columns="material", values="growth_pct").round(1)
+    st.subheader("Crescita % Anno su Anno")
+    st.dataframe(pivot_growth.style.format("{:.1f}%"))
+
+# Stagionalità mensile
+monthly = trend_data["seasonal"]
+if not monthly.empty:
+    fig_season = px.bar(monthly, x="month", y="count", color="material", facet_col="material",
+                        title="Stagionalità mensile (distribuzione depositi per mese)")
+    st.plotly_chart(fig_season, use_container_width=True)
+
+# Confronto materiali sulla stessa scala
+fig_comp = px.line(yearly, x="year", y="count", color="material", 
+                   title="Confronto diretto Zama vs Al vs Mg",
+                   labels={"count": "Numero brevetti", "year": "Anno"})
+st.plotly_chart(fig_comp, use_container_width=True)
+
+===== FILE: pages/4_Competitor_Intelligence.py =====
+"""
+Pagina 4: Ranking depositanti, portfolio tecnologico, network collaborazioni.
+"""
+
+import streamlit as st
+import plotly.express as px
+import plotly.graph_objects as go
+import pandas as pd
+import networkx as nx
+from pyvis.network import Network
+import tempfile
+
+from main import filtered_patents
+from analysis.trends import get_top_applicants
+
+st.title("🏢 Competitor Intelligence")
+
+patents = filtered_patents
+if not patents:
+    st.warning("Nessun dato.")
+    st.stop()
+
+# Top depositanti
+top_df = get_top_applicants(patents, n=15)
+if not top_df.empty:
+    fig_top = px.bar(top_df.head(15), x="total", y="name", orientation="h", 
+                     title="Top 20 Depositanti", labels={"total": "Numero brevetti", "name": ""})
+    st.plotly_chart(fig_top, use_container_width=True)
+    
+    # Portfolio tecnologico (treemap) per azienda selezionata
+    selected_app = st.selectbox("Seleziona depositante per dettaglio portfolio", top_df["name"].head(10))
+    if selected_app:
+        patents_app = [p for p in patents if any(a.name == selected_app for a in p.applicants)]
+        cpc_counts = {}
+        for p in patents_app:
+            for cpc in p.cpc_classes:
+                subclass = cpc[:4]
+                cpc_counts[subclass] = cpc_counts.get(subclass, 0) + 1
+        if cpc_counts:
+            df_cpc = pd.DataFrame({"CPC Subclass": list(cpc_counts.keys()), "Count": list(cpc_counts.values())})
+            fig_treemap = px.treemap(df_cpc, path=["CPC Subclass"], values="Count", 
+                                     title=f"Portfolio tecnologico - {selected_app}")
+            st.plotly_chart(fig_treemap, use_container_width=True)
+
+# Network graph co-depositanti
+st.subheader("🤝 Rete di collaborazioni")
+# Costruzione grafo co-inventori/co-depositanti
+G = nx.Graph()
+for p in patents[:100]:  # limit per performance
+    inventors = p.inventors
+    for i in range(len(inventors)):
+        for j in range(i+1, len(inventors)):
+            G.add_edge(inventors[i], inventors[j], weight=G.get_edge_data(inventors[i], inventors[j], {}).get("weight", 0)+1)
+
+if G.number_of_nodes() > 0:
+    net = Network(height="500px", width="100%", bgcolor="#222222", font_color="white")
+    net.from_nx(G)
+    # Salva HTML temporaneo e visualizza
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp:
+        net.save_graph(tmp.name)
+        with open(tmp.name, "r", encoding="utf-8") as f:
+            html = f.read()
+        st.components.v1.html(html, height=550)
+else:
+    st.info("Nessuna collaborazione rilevata.")
+
+# Market share per tecnologia (CPC classi principali)
+all_cpc = []
+for p in patents:
+    for cpc in p.cpc_classes:
+        all_cpc.append(cpc[:4])
+cpc_series = pd.Series(all_cpc).value_counts().head(8)
+fig_donut = px.pie(values=cpc_series.values, names=cpc_series.index, hole=0.4, title="Market share per sottoclasse CPC")
+st.plotly_chart(fig_donut, use_container_width=True)
+
+===== FILE: pages/5_Technology_Clustering.py =====
+"""
+Pagina 5: Clustering NLP di abstract, LDA, wordcloud.
+"""
+
+import streamlit as st
+import plotly.express as px
+import pandas as pd
+from main import filtered_patents
+from analysis.clustering import cluster_patents, compute_lda, generate_wordcloud
+
+st.title("🧠 Technology Clustering (NLP)")
+
+patents = filtered_patents
+if len(patents) < 5:
+    st.warning("Sono necessari almeno 5 brevetti per il clustering.")
+    st.stop()
+
+with st.spinner("Elaborazione clustering in corso..."):
+    cluster_result = cluster_patents(patents, n_clusters=None)
+    lda_result = compute_lda(patents, n_topics=8)
+
+if cluster_result["labels"]:
+    st.subheader("📌 Cluster dei brevetti (K-Means)")
+    # Scatter plot con UMAP
+    embedding = cluster_result["embedding"]
+    labels = cluster_result["labels"]
+    if embedding is not None and len(embedding) > 0:
+        df_plot = pd.DataFrame({"x": embedding[:,0], "y": embedding[:,1], "cluster": labels.astype(str), "id": cluster_result["ids"]})
+        fig = px.scatter(df_plot, x="x", y="y", color="cluster", hover_data=["id"], title="Proiezione 2D dei cluster (UMAP)")
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # WordCloud per cluster
+    st.subheader("☁️ WordCloud per cluster")
+    cluster_texts = {}
+    for i, label in enumerate(labels):
+        cluster_texts.setdefault(label, []).append(cluster_result["texts"][i])
+    selected_cluster = st.selectbox("Seleziona cluster", sorted(cluster_texts.keys()))
+    if selected_cluster in cluster_texts:
+        wc_fig = generate_wordcloud(cluster_texts[selected_cluster], title=f"Cluster {selected_cluster}")
+        st.pyplot(wc_fig)
+
+# Topic modeling LDA
+if lda_result["topics"]:
+    st.subheader("📚 Topic Modeling (LDA)")
+    for topic in lda_result["topics"]:
+        st.markdown(f"**Topic {topic['topic_id']+1}:** {', '.join(topic['keywords'][:8])}")
+    
+    # Matrice topic-documento heatmap
+    if lda_result["doc_topic"] is not None:
+        doc_topic_df = pd.DataFrame(lda_result["doc_topic"], columns=[f"Topic {i+1}" for i in range(lda_result["doc_topic"].shape[1])])
+        st.dataframe(doc_topic_df.head(10))
+
+===== FILE: pages/6_IP_Risk_White_Space.py =====
+"""
+Pagina 6: Risk analysis, white space, scadenze, citazioni.
+"""
+
+import streamlit as st
+import plotly.express as px
+import pandas as pd
+from datetime import date
+
+from main import filtered_patents
+from analysis.risk import compute_fto_score, track_expiring_patents, cpc_heatmap_data, identify_white_spaces, compute_citation_network
+
+st.title("⚠️ IP Risk & White Space Analysis")
+
+patents = filtered_patents
+if not patents:
+    st.warning("Nessun brevetto.")
+    st.stop()
+
+# FTO scores
+with st.spinner("Calcolo FTO scores..."):
+    fto_scores = [compute_fto_score(p) for p in patents[:100]]  # limit performance
+    df_fto = pd.DataFrame([s.model_dump() for s in fto_scores])
+    st.subheader("Freedom-to-Operate Score (rischio)")
+    st.dataframe(df_fto.sort_values("score", ascending=False).head(10))
+
+# Scadenze
+expiring = track_expiring_patents(patents, [1,3,5])
+st.subheader("⏳ Brevetti in scadenza")
+for window, pat_list in expiring.items():
+    st.write(f"**Entro {window} anni:** {len(pat_list)} brevetti")
+    if pat_list:
+        st.dataframe(pd.DataFrame([{"ID": p.id, "Titolo": p.title, "Scadenza": p.expiry_date} for p in pat_list[:5]]))
+
+# Heatmap CPC copertura
+cpc_pivot = cpc_heatmap_data(patents)
+if not cpc_pivot.empty:
+    st.subheader("🌡️ Heatmap copertura tecnologica per sottoclasse CPC")
+    fig_heat = px.imshow(cpc_pivot, text_auto=True, aspect="auto", labels=dict(x="Materiale", y="CPC subclass", color="Numero brevetti"))
+    st.plotly_chart(fig_heat, use_container_width=True)
+
+    white_spaces = identify_white_spaces(cpc_pivot, threshold=1)
+    if white_spaces:
+        st.subheader("✅ White Space (aree con poca protezione)")
+        for sub, mats in white_spaces[:10]:
+            st.write(f"- **{sub}**: opportunità per {', '.join(mats)}")
+
+# Citazioni
+citation_stats = compute_citation_network(patents)
+st.subheader("📖 Citazioni")
+st.metric("Totale citazioni forward", citation_stats["total_citations"])
+if citation_stats["most_cited"]:
+    st.write("Brevetti più citati:")
+    for pat_id, count in citation_stats["most_cited"][:5]:
+        st.write(f"  - {pat_id}: {count} citazioni")
+
+===== FILE: demo_data/patents_sample.json =====
+[
+  {
+    "id": "EP1234567A1",
+    "title": "Processo di pressofusione per leghe di Zama ad alta resistenza",
+    "abstract": "Metodo per pressofusione di componenti in lega di zinco con migliorata resistenza meccanica.",
+    "filing_date": "2021-03-15",
+    "publication_date": "2022-01-10",
+    "inventors": ["Rossi M.", "Bianchi L."],
+    "applicants": [{"name": "Fonderie Industriali S.p.A.", "country": "IT"}],
+    "ipc_classes": ["B22D17/00"],
+    "cpc_classes": ["B22D17/22", "C22C18/00"],
+    "status": "granted",
+    "country_code": "EP",
+    "material_category": "Zama",
+    "data_source": "demo",
+    "filing_year": 2021
+  },
+  {
+    "id": "US2022123456A1",
+    "title": "Aluminium die casting method for automotive components",
+    "abstract": "High-pressure die casting of aluminium alloys for structural auto parts.",
+    "filing_date": "2020-06-20",
+    "publication_date": "2022-06-20",
+    "inventors": ["Johnson P.", "Smith R."],
+    "applicants": [{"name": "AutoTech GmbH", "country": "DE"}],
+    "ipc_classes": ["B22D17/00"],
+    "cpc_classes": ["B22D17/20", "C22C21/00"],
+    "status": "granted",
+    "country_code": "US",
+    "material_category": "Alluminio",
+    "data_source": "demo",
+    "filing_year": 2020
+  },
+  {
+    "id": "WO2023123456A1",
+    "title": "Magnesium alloy die casting with reduced porosity",
+    "abstract": "Die casting process for magnesium alloys minimizing gas porosity.",
+    "filing_date": "2022-09-01",
+    "publication_date": "2023-03-01",
+    "inventors": ["Chen W.", "Liu Y."],
+    "applicants": [{"name": "Magnesium Research Inst.", "country": "CN"}],
+    "cpc_classes": ["B22D17/00", "C22C23/00"],
+    "status": "pending",
+    "country_code": "WO",
+    "material_category": "Magnesio",
+    "data_source": "demo",
+    "filing_year": 2022
+  }
+]
