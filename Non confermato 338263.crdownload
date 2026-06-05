@@ -1,0 +1,54 @@
+import pandas as pd
+from typing import List, Dict
+from data.models import Patent
+
+def compute_yearly_counts(patents: List[Patent]) -> pd.DataFrame:
+    data = []
+    for p in patents:
+        if p.filing_date:
+            data.append({"year": p.filing_date.year, "material": p.material_category, "count": 1})
+    df = pd.DataFrame(data)
+    if df.empty:
+        return pd.DataFrame(columns=["year", "material", "count"])
+    return df.groupby(["year", "material"]).sum().reset_index()
+
+def compute_moving_average(df: pd.DataFrame, window: int) -> pd.DataFrame:
+    result = df.copy()
+    for material in df["material"].unique():
+        mask = result["material"] == material
+        result.loc[mask, f"ma_{window}y"] = result.loc[mask, "count"].rolling(window, min_periods=1).mean()
+    return result
+
+def year_over_year_growth(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.sort_values(["material", "year"])
+    df["growth_pct"] = df.groupby("material")["count"].pct_change() * 100
+    return df
+
+def aggregate_trends(patents: List[Patent]) -> Dict[str, pd.DataFrame]:
+    yearly = compute_yearly_counts(patents)
+    if yearly.empty:
+        return {"trend": yearly, "seasonal": pd.DataFrame()}
+    yearly = compute_moving_average(yearly, 3)
+    yearly = compute_moving_average(yearly, 5)
+    yearly = year_over_year_growth(yearly)
+    monthly_data = []
+    for p in patents:
+        if p.filing_date:
+            monthly_data.append({"year": p.filing_date.year, "month": p.filing_date.month, "material": p.material_category})
+    monthly_df = pd.DataFrame(monthly_data)
+    if not monthly_df.empty:
+        monthly_df = monthly_df.groupby(["year", "month", "material"]).size().reset_index(name="count")
+    return {"trend": yearly, "seasonal": monthly_df}
+
+def get_top_applicants(patents: List[Patent], n: int = 20) -> pd.DataFrame:
+    applicants = []
+    for p in patents:
+        for app in p.applicants:
+            applicants.append({"name": app.name, "material": p.material_category})
+    df = pd.DataFrame(applicants)
+    if df.empty:
+        return pd.DataFrame()
+    top = df.groupby("name").size().reset_index(name="total").sort_values("total", ascending=False).head(n)
+    mat_counts = df.groupby(["name", "material"]).size().unstack(fill_value=0)
+    top = top.merge(mat_counts, left_on="name", right_index=True, how="left")
+    return top

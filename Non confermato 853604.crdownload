@@ -1,0 +1,96 @@
+import re
+import numpy as np
+import pandas as pd
+from typing import List, Tuple, Dict, Any
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.cluster import KMeans
+from sklearn.decomposition import LatentDirichletAllocation
+from sklearn.metrics import silhouette_score
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import PorterStemmer
+import umap.umap_ as umap
+from wordcloud import WordCloud
+import matplotlib.pyplot as plt
+from loguru import logger
+
+try:
+    nltk.data.find('tokenizers/punkt')
+except LookupError:
+    nltk.download('punkt')
+    nltk.download('stopwords')
+
+STEMMER = PorterStemmer()
+STOP_WORDS = set(stopwords.words("italian") + stopwords.words("english") + ["zama", "alluminio", "magnesio", "die", "casting", "pressofusione"])
+
+def preprocess_text(text: str) -> str:
+    if not text:
+        return ""
+    text = text.lower()
+    text = re.sub(r"[^a-zàèéìòù\s]", " ", text)
+    tokens = text.split()
+    tokens = [STEMMER.stem(t) for t in tokens if t not in STOP_WORDS and len(t) > 2]
+    return " ".join(tokens)
+
+def prepare_documents(patents: List[Any]) -> Tuple[List[str], List[str]]:
+    texts, ids = [], []
+    for p in patents:
+        content = f"{p.title}. {p.abstract}"
+        processed = preprocess_text(content)
+        if processed:
+            texts.append(processed)
+            ids.append(p.id)
+    return texts, ids
+
+def optimize_kmeans(tfidf_matrix, max_k: int = 15):
+    inertias, sil_scores = [], []
+    ks = range(2, min(max_k, tfidf_matrix.shape[0] - 1))
+    for k in ks:
+        kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
+        labels = kmeans.fit_predict(tfidf_matrix)
+        inertias.append(kmeans.inertia_)
+        if len(set(labels)) > 1:
+            sil_scores.append(silhouette_score(tfidf_matrix, labels))
+        else:
+            sil_scores.append(-1)
+    best_k = ks[np.argmax(sil_scores)] if sil_scores else 5
+    return best_k, inertias
+
+def cluster_patents(patents: List[Any], n_clusters: int = None) -> Dict[str, Any]:
+    texts, ids = prepare_documents(patents)
+    if len(texts) < 3:
+        return {"labels": [], "vectors": None, "model": None, "ids": ids, "texts": texts}
+    vectorizer = TfidfVectorizer(max_features=1000, min_df=2, max_df=0.9)
+    tfidf = vectorizer.fit_transform(texts)
+    if n_clusters is None:
+        n_clusters, _ = optimize_kmeans(tfidf, max_k=min(10, len(texts)-1))
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    labels = kmeans.fit_predict(tfidf)
+    reducer = umap.UMAP(n_components=2, random_state=42)
+    embedding = reducer.fit_transform(tfidf.toarray())
+    return {"labels": labels, "vectors": tfidf, "model": kmeans, "vectorizer": vectorizer, "embedding": embedding, "ids": ids, "texts": texts, "n_clusters": n_clusters}
+
+def compute_lda(patents: List[Any], n_topics: int = 10) -> Dict[str, Any]:
+    texts, ids = prepare_documents(patents)
+    if len(texts) < 2:
+        return {"model": None, "doc_topic": None, "topics": []}
+    vectorizer = TfidfVectorizer(max_features=500, min_df=2, stop_words=list(STOP_WORDS))
+    dtm = vectorizer.fit_transform(texts)
+    lda = LatentDirichletAllocation(n_components=n_topics, random_state=42, max_iter=20)
+    doc_topic = lda.fit_transform(dtm)
+    feature_names = vectorizer.get_feature_names_out()
+    topics_keywords = []
+    for topic_idx, topic in enumerate(lda.components_):
+        top_words_idx = topic.argsort()[-10:][::-1]
+        top_words = [feature_names[i] for i in top_words_idx]
+        topics_keywords.append({"topic_id": topic_idx, "keywords": top_words})
+    return {"model": lda, "doc_topic": doc_topic, "topics": topics_keywords, "vectorizer": vectorizer}
+
+def generate_wordcloud(texts: List[str], title: str = "WordCloud") -> plt.Figure:
+    combined = " ".join(texts) if texts else "nessun dato"
+    wordcloud = WordCloud(width=800, height=400, background_color="black", colormap="viridis").generate(combined)
+    fig, ax = plt.subplots(figsize=(10,5))
+    ax.imshow(wordcloud, interpolation="bilinear")
+    ax.axis("off")
+    ax.set_title(title)
+    return fig
